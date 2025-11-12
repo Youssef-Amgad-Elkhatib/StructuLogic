@@ -109,11 +109,20 @@ module Adder_8bit (
 
 endmodule
 
-module arithmetic_left_shift(input [7:0] B, output [7:0] Z);
-assign Z = (B<<<1);
+module arithmetic_left_shift(
+    input [7:0] B,
+    output [7:0] result,
+    output overflow
+);
+    wire signed [7:0] B_temp = B;
+    wire signed [8:0] temp = B_temp <<< 1;
+
+    assign result   = temp[7:0];
+    assign overflow = temp[8] ^ temp[7];
 endmodule
 
-module arithmetic_right_shift(input [7:0] B, output [7:0] Z);
+
+module arithmetic_right_shift(input signed [7:0]  B, output [7:0] Z);
 assign Z = (B>>>1);
 endmodule
 
@@ -167,13 +176,14 @@ endmodule
 module shift_unit(
     input [7:0] B,
     input opcode,
-    output [7:0] shift_result
+    output [7:0] shift_result,
+    output overflow
 );
-    // Wires to capture outputs
     wire [7:0] asl_out, asr_out;
+    wire asl_overflow;
 
     // Generate both shifts
-    arithmetic_left_shift  asl(B, asl_out);
+    arithmetic_left_shift  asl(B, asl_out, asl_overflow);
     arithmetic_right_shift asr(B, asr_out);
 
     // Select only one using mux2
@@ -183,6 +193,10 @@ module shift_unit(
         .Selector(opcode),
         .Z(shift_result)
     );
+
+    // Overflow occurs only for ASL
+    assign overflow = (opcode == 0) ? asl_overflow : 1'b0;
+
 endmodule
 
 module rotate_unit(
@@ -223,7 +237,7 @@ wire C7,CarryOut;
 // Select B based on opcode
 mux2 B_res(
 .A(B),
-.B(8'b00000000),
+.B(8'b00000001),
 .Selector(opcode[1]),
 .Z(B_in)
 );
@@ -236,27 +250,20 @@ mux2 A_res(
 .Z(A_in)
 );
 
-mux2 A_Final(
-.A(A_in),
-.B(A),
-.Selector(opcode[2]),
-.Z(A_Final_in)
-);
-
 // Adder
 Adder_8bit add(
 .Result(add_result),
 .CarryOut(CarryOut),
 .C7(C7),
-.A_in(A_Final_in),
+.A_in(A_in),
 .B_in(B_in),
-.CarryIn(opcode[1]|opcode[0])
+.CarryIn(opcode[0])
 );
 
 // Set on Equal
 // or all bits, if result equals 1, then the result wasn't zero, therefore they weren't equal else they are 1
 wire [7:0] eq_result;
-assign eq_result = (~(|add_result)) ? 8'b00000001 : 8'b00000000;
+assign eq_result = ~((|add_result)) ? 8'b00000001 : 8'b00000000;
 
 // Choose final result between adder result and set on equal result based on opcode 2
 mux2 final_result(
@@ -266,7 +273,7 @@ mux2 final_result(
 .Z(adder_result)
 );
 
-assign overflow = C7 ^ CarryOut;
+assign overflow =(~(opcode[2]))? (C7 ^ CarryOut): 1'b0;
 endmodule
 
 module ALU_8 (output [7:0] Result, output Zero, Negative, Overflow,
@@ -279,7 +286,7 @@ wire [7:0] shift_result;
 wire [7:0] rotate_result;
 wire [7:0] arithmetic_shift_result;
 wire [7:0] logical_rotate_result;
-wire overflow;
+wire overflow_arithmetic,overflow_shift;
 
 // Generate results of the subsets in the wires
 logic_unit lu(
@@ -292,7 +299,8 @@ logic_unit lu(
 shift_unit su(
 .B(B),
 .opcode(AluOp[0]),
-.shift_result(shift_result)
+.shift_result(shift_result),
+.overflow(overflow_shift)
 );
 
 rotate_unit ru(
@@ -306,7 +314,7 @@ arithmetic_unit au(
 .B(B),
 .opcode(AluOp[2:0]),
 .adder_result(arithmetic_result),
-.overflow(overflow)
+.overflow(overflow_arithmetic)
 );
 
 // Result Output
@@ -335,8 +343,10 @@ assign Zero = ~(|Result);
 
 assign Negative = Result[7];
 
-assign Overflow=overflow;
-
+assign Overflow = (AluOp == 4'b0110) ? overflow_shift :
+                  ((AluOp == 4'b0000 || AluOp == 4'b0001 ||
+                    AluOp == 4'b0010 || AluOp == 4'b0011 ||
+                    AluOp == 4'b0100) ? overflow_arithmetic : 1'b0);
 endmodule
 
 
@@ -355,8 +365,7 @@ module tb_ALU_8bit_selfcheck();
     reg [7:0] expected;
     reg exp_zero, exp_neg, exp_overflow;
 
-    // Instantiate the ALU
-    ALU_8 inst (
+    ALU_8 alu (
         .Result(Result),
         .Zero(Zero),
         .Negative(Negative),
@@ -378,8 +387,8 @@ module tb_ALU_8bit_selfcheck();
                 pass_count = pass_count + 1;
             end else begin
                 fail_count = fail_count + 1;
-                $display("❌ FAIL @ time=%0t | AluOp=%b | A=%d | B=%d | Got=%d | Exp=%d | Zero=%b (Exp %b) | Neg=%b (Exp %b) | Overflow=%b (Exp %b)",
-                    $time, ALUOp, A, B, Result, exp, Zero, expZ, Negative, expN, Overflow, expO);
+                $display("FAIL @ time=%0t | AluOp=%b | A=%d | B=%d | Got=%d | Exp=%d | Zero=%b (Exp %b) | Neg=%b (Exp %b) | Overflow=%b (Exp %b)",
+                    $time, ALUOp, $signed(A), $signed(B), $signed(Result), $signed(exp), Zero, expZ, Negative, expN, Overflow, expO);
             end
         end
     endtask
@@ -387,49 +396,194 @@ module tb_ALU_8bit_selfcheck();
     initial begin
         $display("----- Starting ALU Self-Checking Testbench -----");
 
+        // ----------------------------------------------------------------------
         // ADD (0000)
-        check(4'b0000, 10, 5, 15, 0, 0, 0);
-        check(4'b0000, 0, 0, 0, 1, 0, 0);
-        check(4'b0000, 127, 127, 254, 0, 1, 1); // Overflow
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing ADD (0000) ---");
+        check(4'b0000, 8'd10, 8'd5, 8'd15, 0, 0, 0);
+        check(4'b0000, 8'd0, 8'd0, 8'd0, 1, 0, 0);
+        check(4'b0000, 8'd50, 8'd70, 120, 0, 0, 0);
+        check(4'b0000, 8'd60, -50, 10, 0, 0, 0);
+        check(4'b0000, -5, 8'd10, 5, 0, 0, 0);
+        check(4'b0000, -10, 5, -5, 0, 1, 0);
+        check(4'b0000, -1, -1, -2, 0, 1, 0);
+        check(4'b0000, 63, 63, 126, 0, 0, 0);
+        check(4'b0000, 127, -1, 126, 0, 0, 0);
+        check(4'b0000, -128, -1, 127, 0, 0, 1);
 
-        // SUB (0001) -> B - A
-        check(4'b0001, 20, 50, 30, 0, 0, 0); // 50-20=30
-        check(4'b0001, 10, 100, 90, 0, 0, 0); // 100-10=90
-        check(4'b0001, 50, 50, 0, 1, 0, 0);   // 50-50=0
+        // ----------------------------------------------------------------------
+        // SUB (0001)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing SUB (0001) ---");
+        check(4'b0001, 8'd20, 8'd50, 30, 0, 0, 0);
+        check(4'b0001, -128, 127, -1, 0, 1, 1);
+        check(4'b0001, 8'd50, 8'd50, 0, 1, 0, 0);
+        check(4'b0001, 8'd1, 0, -1, 0, 1, 0);
+        check(4'b0001, -2, -1, 1, 0, 0, 0);
+        check(4'b0001, 127, 1, -126, 0, 1, 0);
+        check(4'b0001, 1, -128, -129, 0, 0, 1);
+        check(4'b0001, -128, 1, 129, 0, 1, 1);
+        check(4'b0001, 5, -5, -10, 0, 1, 0);
+        check(4'b0001, 10, 100, 90, 0, 0, 0);
 
+        // ----------------------------------------------------------------------
         // INC (0010)
-        check(4'b0010, 10, 0, 11, 0, 0, 0);
-        check(4'b0010, 255, 0, 0, 1, 0, 1); // 255+1=0 with overflow
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing INC (0010) ---");
+        check(4'b0010, 8'd10, 0, 11, 0, 0, 0);
+        check(4'b0010, 0, 5, 1, 0, 0, 0);
+        check(4'b0010, 127, 0, -128, 0, 1, 1);
+        check(4'b0010, -1, 0, 0, 1, 0, 0);
+        check(4'b0010, -128, 0, -127, 0, 1, 0);
+        check(4'b0010, -2, 0, -1, 0, 1, 0);
+        check(4'b0010, 1, 0, 2, 0, 0, 0);
+        check(4'b0010, 126, 0, 127, 0, 0, 0);
+        check(4'b0010, -64, 0, -63, 0, 1, 0);
+        check(4'b0010, 120, 0, 121, 0, 0, 0);
 
-        // Set-on-equal (0101)
-        check(4'b0101, 10, 10, 1, 0, 0, 0); // A==B -> 1
-        check(4'b0101, 10, 5, 0, 1, 0, 0);  // A!=B -> 0
+        // ----------------------------------------------------------------------
+        // Set-on-Equal (0101)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing Set-on-Equal (0101) ---");
+        check(4'b0101, 8'd10, 8'd10, 1, 0, 0, 0);
+        check(4'b0101, 8'd10, 8'd5, 0, 1, 0, 0);
+        check(4'b0101, 127, 127, 1, 0, 0, 0);
+        check(4'b0101, 126, -128, 0, 1, 0, 0);
+        check(4'b0101, -1, -1, 1, 0, 0, 0);
+        check(4'b0101, 127, -128, 0, 1, 0, 0);
+        check(4'b0101, 0, 0, 1, 0, 0, 0);
+        check(4'b0101, 100, 1, 0, 1, 0, 0);
+        check(4'b0101, -56, -56, 1, 0, 0, 0);
+        check(4'b0101, -56, -55, 0, 1, 0, 0);
 
+        // ----------------------------------------------------------------------
         // Arithmetic left shift (0110)
-        check(4'b0110, 0, 170, 84, 0, 0, 0); // 0b10101010 << 1 = 0b01010100 (84)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing Arithmetic Left Shift (0110) ---");
+        check(4'b0110, 0, 10, 20, 0, 0, 0);
+        check(4'b0110, 0, 0, 0, 1, 0, 0);
+        check(4'b0110, 0, 63, 126, 0, 0, 0);
+        check(4'b0110, 0, -128, 0, 1, 0, 1);
+        check(4'b0110, 0, 1, 2, 0, 0, 0);
+        check(4'b0110, 0, -1, -2, 0, 1, 0);
+        check(4'b0110, 0, 64, -128, 0, 1, 1);
+        check(4'b0110, 0, -64, -128, 0, 1, 0);
+        check(4'b0110, 0, -86, -172, 0, 0, 1);
+        check(4'b0110, 0, 77, 154, 0, 1, 1);
 
+        // ----------------------------------------------------------------------
         // Arithmetic right shift (0111)
-        check(4'b0111, 0, 170, 85, 0, 0, 0); // 0b10101010 >>> 1 = 0b11010101 (213, sign preserved)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing Arithmetic Right Shift (0111) ---");
+        check(4'b0111, 0, 10, 5, 0, 0, 0);
+        check(4'b0111, 0, 0, 0, 1, 0, 0);
+        check(4'b0111, 0, 127, 63, 0, 0, 0);
+        check(4'b0111, 0, -128, -64, 0, 1, 0);
+        check(4'b0111, 0, -1, -1, 0, 1, 0);
+        check(4'b0111, 0, -2, -1, 0, 1, 0);
+        check(4'b0111, 0, 1, 0, 1, 0, 0);
+        check(4'b0111, 0, 3, 1, 0, 0, 0);
+        check(4'b0111, 0, -86, -43, 0, 1, 0);
+        check(4'b0111, 0, -56, -28, 0, 1, 0);
 
+        // ----------------------------------------------------------------------
         // NOT (1000)
-        check(4'b1000, 204, 0, 51, 0, 0, 0); // ~204=51
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing NOT (1000) ---");
+        check(4'b1000, 8'd204, 0, -205, 0, 0, 0);
+        check(4'b1000, 0, 0, -1, 0, 1, 0);
+        check(4'b1000, -1, 0, 0, 1, 0, 0);
+        check(4'b1000, 127, 0, -128, 0, 1, 0);
+        check(4'b1000, -128, 0, 127, 0, 0, 0);
+        check(4'b1000, 1, 0, -2, 0, 1, 0);
+        check(4'b1000, -2, 0, 1, 0, 0, 0);
+        check(4'b1000, 85, 0, -86, 0, 1, 0);
+        check(4'b1000, -86, 0, 85, 0, 0, 0);
+        check(4'b1000, -16, 0, 15, 0, 0, 0);
 
+        // ----------------------------------------------------------------------
         // AND (1001)
-        check(4'b1001, 204, 170, 136, 0, 1, 0); // 0b11001100 & 0b10101010 = 0b10001000=136
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing AND (1001) ---");
+        check(4'b1001, 12, -10, 4, 0, 0, 0);
+        check(4'b1001, -128, 127, 0, 1, 0, 0);
+        check(4'b1001, -1, 0, 0, 1, 0, 0);
+        check(4'b1001, -1, -1, -1, 0, 1, 0);
+        check(4'b1001, 127, -128, 0, 1, 0, 0);
+        check(4'b1001, -128, -128, -128, 0, 1, 0);
+        check(4'b1001, 15, -16, 0, 1, 0, 0);
+        check(4'b1001, 15, 1, 1, 0, 0, 0);
+        check(4'b1001, -127, 127, 1, 0, 0, 0);
+        check(4'b1001, -86, -86, -86, 0, 1, 0);
 
+        // ----------------------------------------------------------------------
         // OR (1010)
-        check(4'b1010, 204, 170, 238, 0, 1, 0); // 0b11001100 | 0b10101010 = 0b11101110=238
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing OR (1010) ---");
+        check(4'b1010, 12, -10, -2, 0, 1, 0);
+        check(4'b1010, -128, 127, -1, 0, 1, 0);
+        check(4'b1010, -1, 0, -1, 0, 1, 0);
+        check(4'b1010, -1, -1, -1, 0, 1, 0);
+        check(4'b1010, 127, -128, -1, 0, 1, 0);
+        check(4'b1010, -128, -128, -128, 0, 1, 0);
+        check(4'b1010, 15, -16, -1, 0, 1, 0);
+        check(4'b1010, 1, 1, 1, 0, 0, 0);
+        check(4'b1010, 10, -6, -6, 0, 1, 0);
+        check(4'b1010, -86, -86, -86, 0, 1, 0);
 
+        // ----------------------------------------------------------------------
         // NAND (1011)
-        check(4'b1011, 204, 170, 119, 0, 0, 0); // ~(A&B)=~0b10001000=0b01110111=119
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing NAND (1011) ---");
+        check(4'b1011, 12, -10, -5, 0, 1, 0);
+        check(4'b1011, -128, 127, -1, 0, 1, 0);
+        check(4'b1011, -1, 0, -1, 0, 1, 0);
+        check(4'b1011, -1, -1, 0, 1, 0, 0);
+        check(4'b1011, 127, -128, -1, 0, 1, 0);
+        check(4'b1011, -128, -128, 127, 0, 0, 0);
+        check(4'b1011, 15, -16, -1, 0, 1, 0);
+        check(4'b1011, 1, 1, -2, 0, 1, 0);
+        check(4'b1011, -16, 1, -1, 0, 1, 0);
+        check(4'b1011, -86, -86, 85, 0, 0, 0);
+
+        // ----------------------------------------------------------------------
+        // ROTATE LEFT (1100)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing ROTATE LEFT (1100) ---");
+        check(4'b1100, 8'd10, 8'd3, 20, 0, 0, 0);
+        check(4'b1100, 127, 2, -2, 0, 1, 0);
+        check(4'b1100, 0, 0, 0, 1, 0, 0);
+        check(4'b1100, 1, 0, 2, 0, 0, 0);
+        check(4'b1100, -128, 0, 1, 0, 0, 0);
+        check(4'b1100, -1, 0, -1, 0, 1, 0);
+        check(4'b1100, -86, 0, 85, 0, 0, 0);
+        check(4'b1100, 85, 0, -86, 0, 1, 0);
+        check(4'b1100, -64, 0, -127, 0, 1, 0);
+        check(4'b1100, 64, 0, -128, 0, 1, 0);
+
+        // ----------------------------------------------------------------------
+        // ROTATE RIGHT (1101)
+        // ----------------------------------------------------------------------
+        $display("\n--- Testing ROTATE RIGHT (1101) ---");
+        check(4'b1101, 20, 0, 10, 0, 0, 0);
+        check(4'b1101, 0, 0, 0, 1, 0, 0);
+        check(4'b1101, 1, 5, -128, 0, 1, 0);
+        check(4'b1101, 127, 4, -65, 0, 1, 0);
+        check(4'b1101, -128, 0, 64, 0, 0, 0);
+        check(4'b1101, -1, 0, -1, 0, 1, 0);
+        check(4'b1101, -86, 0, 85, 0, 0, 0);
+        check(4'b1101, 85, 0, -86, 0, 1, 0);
+        check(4'b1101, 2, 0, 1, 0, 0, 0);
+        check(4'b1101, -63, 0, -32, 0, 1, 0);
 
         $display("------------------------------------------------");
-        $display("✅ Tests Completed: %0d total | %0d passed | %0d failed", total, pass_count, fail_count);
+        $display("Tests Completed: %0d total | %0d passed | %0d failed", total, pass_count, fail_count);
         $display("------------------------------------------------");
         if (fail_count == 0)
-            $display("🎉 All ALU tests passed successfully!");
+            $display("All ALU tests passed successfully!");
         else
-            $display("⚠️ Some tests failed! Please review details above.");
+            $display("⚠Some tests failed! Please review details above.");
         $finish;
     end
+
 endmodule
