@@ -47,7 +47,26 @@ module nand_gate(input [7:0] A, B,  output [7:0] Z);
     nand nand7(Z[7], A[7], B[7]);
 endmodule
 
-// 2x1 Multiplexer using structural modeling
+// 1-bit 2x1 Multiplexer using structural modeling
+// Uses 2 AND gates, 1 OR gate, and 1 NOT gate
+module mux2_1bit(
+    input A, B,
+    input Selector,
+    output Z
+);
+    wire Z1, Z2;
+    wire nSelector;
+
+    // NOT for selector
+    not (nSelector, Selector);
+
+    // Apply gates bitwise
+    and(Z1, nSelector, A);
+    and(Z2, Selector, B);
+    or(Z, Z2, Z1);
+endmodule
+
+// 8-bit 2x1 Multiplexer using structural modeling
 // Uses 2 AND gates, 1 OR gate, and 1 NOT gate
 module mux2(
     input [7:0] A, B,
@@ -286,7 +305,7 @@ wire [7:0] shift_result;
 wire [7:0] rotate_result;
 wire [7:0] arithmetic_shift_result;
 wire [7:0] logical_rotate_result;
-wire overflow_arithmetic,overflow_shift;
+wire overflow_arithmetic,overflow_shift,overflow_candidate;
 
 // Generate results of the subsets in the wires
 logic_unit lu(
@@ -343,10 +362,22 @@ assign Zero = ~(|Result);
 
 assign Negative = Result[7];
 
-assign Overflow = (AluOp == 4'b0110) ? overflow_shift :
-                  ((AluOp == 4'b0000 || AluOp == 4'b0001 ||
-                    AluOp == 4'b0010 || AluOp == 4'b0011 ||
-                    AluOp == 4'b0100) ? overflow_arithmetic : 1'b0);
+// Select between arithmetic operations overflow and left shift overflow
+mux2_1bit overflowCandidate(
+.A(overflow_arithmetic),
+.B(overflow_shift),
+.Selector(AluOp[2] & AluOp[1] & ~AluOp[3] & ~AluOp[0]),
+.Z(overflow_candidate)
+);
+
+// Select between overflow and no overflow operations
+mux2_1bit overflowFinal(
+.A(overflow_candidate),
+.B(1'b0),
+.Selector(AluOp[3] | (AluOp[2] & AluOp[1] & AluOp[0])),
+.Z(Overflow)
+);
+
 endmodule
 
 
@@ -381,7 +412,7 @@ module tb_ALU_8bit_selfcheck();
         input expZ, expN, expO;
         begin
             ALUOp = op; A = a; B = b;
-            #5; // wait for output to settle
+            #5;
             total = total + 1;
             if (Result === exp && Zero === expZ && Negative === expN && Overflow === expO) begin
                 pass_count = pass_count + 1;
