@@ -366,7 +366,7 @@ assign Negative = Result[7];
 mux2_1bit overflowCandidate(
 .A(overflow_arithmetic),
 .B(overflow_shift),
-.Selector(AluOp[2] & AluOp[1] & ~AluOp[3] & ~AluOp[0]),
+.Selector((AluOp[2] & AluOp[1] & (~AluOp[3]) & (~AluOp[0]))),
 .Z(overflow_candidate)
 );
 
@@ -374,15 +374,14 @@ mux2_1bit overflowCandidate(
 mux2_1bit overflowFinal(
 .A(overflow_candidate),
 .B(1'b0),
-.Selector(AluOp[3] | (AluOp[2] & AluOp[1] & AluOp[0])),
+.Selector((AluOp[3] | (AluOp[2] & AluOp[1] & AluOp[0]))),
 .Z(Overflow)
 );
+
 
 endmodule
 
 
-
-`timescale 1ns/1ps
 
 module tb_ALU_8bit_selfcheck();
     reg [7:0] A, B;
