@@ -133,4 +133,10 @@ Module: `tb_ALU_8bit_selfcheck`
 
 #### 📈 Evaluation Metrics
 - **Coverage:** 100% of defined OpCodes tested  
-- **Accuracy:** Fully verified against behavioral reference logic  
+- **Accuracy:** Fully verified against behavioral reference logic
+
+---
+<p>
+  <h1>ALU Schematic</h1>
+  <img src="ALU.png" width="800" title="ALU Schematic">
+</p>
